@@ -3,6 +3,8 @@ import Layout from "./components/Layout";
 import GraphPage from "./pages/GraphPage";
 import CapturePage from "./pages/CapturePage";
 import InsightsPage from "./pages/InsightsPage";
+import { ThoughtWeaverAPI } from "./ThoughtWeaverClient";
+
 
 export default function App() {
   return (

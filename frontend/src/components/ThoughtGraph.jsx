@@ -1,10 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
 
-function tokenize(str) {
-  return str.toLowerCase().split(/\W+/).filter(Boolean);
-}
-
 function colorFor(id) {
   const colors = ["#38bdf8", "#a855f7", "#22c55e", "#f97316", "#e11d48"];
   let h = 0;
@@ -12,6 +8,8 @@ function colorFor(id) {
   return colors[h];
 }
 
+// IMPORTANT: this component expects to live at:
+// frontend/src/components/ThoughtGraph.jsx
 export default function ThoughtGraph() {
   const svgRef = useRef(null);
 
@@ -27,6 +25,9 @@ export default function ThoughtGraph() {
   const [input, setInput] = useState("");
   const [theme, setTheme] = useState("dark");
   const [status, setStatus] = useState("");
+
+  // keep latest theme available to renderGraph without stale closures
+  const themeRef = useRef("dark");
 
   const showStatus = (txt) => {
     setStatus(txt);
@@ -46,9 +47,12 @@ export default function ThoughtGraph() {
     groupRef.current = g;
 
     svg.call(
-      d3.zoom().scaleExtent([0.3, 3]).on("zoom", (e) => {
-        g.attr("transform", e.transform);
-      })
+      d3
+        .zoom()
+        .scaleExtent([0.3, 3])
+        .on("zoom", (e) => {
+          g.attr("transform", e.transform);
+        })
     );
 
     const sim = d3
@@ -60,14 +64,21 @@ export default function ThoughtGraph() {
 
     simRef.current = sim;
 
-    // start empty
     nodesRef.current = [];
     linksRef.current = [];
 
     renderGraph();
 
     return () => sim.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // keep themeRef in sync + re-render graph on theme change
+  useEffect(() => {
+    themeRef.current = theme;
+    renderGraph();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme]);
 
   // ---------- CORE RENDER ----------
   const renderGraph = () => {
@@ -92,8 +103,7 @@ export default function ThoughtGraph() {
       .attr("stroke-opacity", 0.9);
 
     // NODES
-    const node = g
-      .append("g")
+    g.append("g")
       .selectAll("circle")
       .data(nodes)
       .enter()
@@ -108,8 +118,9 @@ export default function ThoughtGraph() {
       .ease(d3.easeElasticOut)
       .attr("r", 18);
 
-    // LABELS
-    const labelColor = theme === "dark" ? "#e5e7eb" : "#1e293b";
+    // LABELS (brighter + theme-aware via themeRef)
+    const isDark = themeRef.current === "dark";
+    const labelColor = isDark ? "#f9fafb" : "#0f172a";
 
     const label = g
       .append("g")
@@ -165,24 +176,27 @@ export default function ThoughtGraph() {
     });
   };
 
-  // ---------- AI LINKING (Option B: backend OpenAI) ----------
+  // ---------- AI LINKING (Render backend) ----------
   const linkNewNodeWithAI = async (newNode) => {
     const existing = nodesRef.current;
     const links = linksRef.current;
 
-    if (existing.length === 0) return; // nothing to compare to
+    if (existing.length === 0) return;
 
     let scored = [];
 
     try {
-      const res = await fetch("http://localhost:4000/api/embeddings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          newNode: newNode.id,
-          existing: existing.map((n) => n.id),
-        }),
-      });
+      const res = await fetch(
+        "https://thoughtweaver-backend-e3w3.onrender.com/api/embeddings",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            newNode: newNode.id,
+            existing: existing.map((n) => n.id),
+          }),
+        }
+      );
 
       if (!res.ok) {
         throw new Error("Embedding API error");
@@ -205,7 +219,7 @@ export default function ThoughtGraph() {
     } catch (e) {
       console.error("Embedding API failed", e);
       showStatus("Embedding API failed");
-      return; // don't fall back silently; requirement is to actually use OpenAI
+      return;
     }
 
     const threshold = 0.35;
@@ -227,8 +241,11 @@ export default function ThoughtGraph() {
     const text = input.trim();
     if (!text) return;
 
+    const normalized = text.toLowerCase();
     const nodes = nodesRef.current;
-    if (nodes.find((n) => n.id === text)) {
+
+    // better duplicate detection (case-insensitive, trimmed)
+    if (nodes.some((n) => n.id.toLowerCase() === normalized)) {
       showStatus("Already exists");
       return;
     }
@@ -328,8 +345,6 @@ export default function ThoughtGraph() {
   // ---------- THEME ----------
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
-    // re-render labels with new text color
-    setTimeout(() => renderGraph(), 0);
   };
 
   const isDark = theme === "dark";
@@ -385,11 +400,7 @@ export default function ThoughtGraph() {
           </button>
           <button
             onClick={saveGraph}
-            className={`px-3 py-1.5 rounded font-semibold ${
-              isDark
-                ? "bg-emerald-500 text-black"
-                : "bg-emerald-500 text-black"
-            }`}
+            className="px-3 py-1.5 rounded font-semibold bg-emerald-500 text-black"
           >
             Save
           </button>
@@ -472,7 +483,8 @@ export default function ThoughtGraph() {
           >
             <div className="flex justify-between items-center mb-3">
               <div className="font-semibold text-sm">
-                Thought details: <span className="font-bold">{modalNode.id}</span>
+                Thought details:{" "}
+                <span className="font-bold">{modalNode.id}</span>
               </div>
               <button
                 onClick={closeModal}

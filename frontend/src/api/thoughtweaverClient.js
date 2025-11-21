@@ -1,4 +1,4 @@
-const API_URL = "https://thoughtweaver-backend-e3w3.onrender.com";
+const API_URL = "https://thoughtweaver.onrender.com";
 
 async function handle(res) {
   if (!res.ok) {

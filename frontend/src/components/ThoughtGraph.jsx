@@ -187,7 +187,7 @@ export default function ThoughtGraph() {
 
     try {
       const res = await fetch(
-        "https://thoughtweaver-backend-e3w3.onrender.com/api/embeddings",
+        "https://thoughtweaver.onrender.com/api/embeddings",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

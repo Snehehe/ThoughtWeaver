@@ -4,7 +4,9 @@ import bodyParser from "body-parser";
 import OpenAI from "openai";
 
 const app = express();
-const port = 4000;
+
+// *** FIX FOR RENDER ***
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -14,9 +16,7 @@ const client = new OpenAI({
 });
 
 function cosineSim(a, b) {
-  let dot = 0,
-    na = 0,
-    nb = 0;
+  let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     na += a[i] * a[i];
@@ -56,6 +56,7 @@ app.post("/api/embeddings", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Embedding server listening on http://localhost:${port}`);
+// *** FIX FOR RENDER ***
+app.listen(PORT, () => {
+  console.log(`Embedding server listening on port ${PORT}`);
 });

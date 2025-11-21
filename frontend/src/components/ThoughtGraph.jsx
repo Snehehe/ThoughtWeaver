@@ -8,8 +8,6 @@ function colorFor(id) {
   return colors[h];
 }
 
-// IMPORTANT: this component expects to live at:
-// frontend/src/components/ThoughtGraph.jsx
 export default function ThoughtGraph() {
   const svgRef = useRef(null);
 
@@ -18,6 +16,9 @@ export default function ThoughtGraph() {
 
   const simRef = useRef(null);
   const groupRef = useRef(null);
+
+  // NEW: groups of node IDs that are in "cyclic" components
+  const cycleGroupsRef = useRef([]);
 
   const [selectedNode, setSelectedNode] = useState(null);
   const [modalNode, setModalNode] = useState(null);
@@ -32,6 +33,73 @@ export default function ThoughtGraph() {
   const showStatus = (txt) => {
     setStatus(txt);
     setTimeout(() => setStatus(""), 2200);
+  };
+
+  // ---------- CYCLE GROUPS RECOMPUTE ----------
+  // any connected component with edges >= vertices (and >=3 nodes) is treated as cyclic
+  const updateCycleGroups = () => {
+    const nodes = nodesRef.current;
+    const links = linksRef.current;
+
+    if (!nodes.length || !links.length) {
+      cycleGroupsRef.current = [];
+      return;
+    }
+
+    const idToIndex = new Map(nodes.map((n, idx) => [n.id, idx]));
+    const adj = nodes.map(() => []);
+    const compIndex = Array(nodes.length).fill(-1);
+    const edgeCountPerComp = [];
+    let compCount = 0;
+
+    // undirected adjacency
+    links.forEach((l) => {
+      const sid = typeof l.source === "object" ? l.source.id : l.source;
+      const tid = typeof l.target === "object" ? l.target.id : l.target;
+      const si = idToIndex.get(sid);
+      const ti = idToIndex.get(tid);
+      if (si == null || ti == null) return;
+      adj[si].push(ti);
+      adj[ti].push(si);
+    });
+
+    // DFS to get components
+    for (let i = 0; i < nodes.length; i++) {
+      if (compIndex[i] !== -1) continue;
+      const stack = [i];
+      compIndex[i] = compCount;
+      let verts = 0;
+      let edges = 0;
+
+      while (stack.length) {
+        const u = stack.pop();
+        verts++;
+        edges += adj[u].length;
+        for (const v of adj[u]) {
+          if (compIndex[v] === -1) {
+            compIndex[v] = compCount;
+            stack.push(v);
+          }
+        }
+      }
+
+      edges = edges / 2; // undirected
+      edgeCountPerComp.push({ verts, edges });
+      compCount++;
+    }
+
+    const groups = [];
+    for (let c = 0; c < compCount; c++) {
+      const { verts, edges } = edgeCountPerComp[c];
+      if (edges >= verts && verts >= 3) {
+        const groupNodeIds = nodes
+          .map((n, idx) => (compIndex[idx] === c ? n.id : null))
+          .filter(Boolean);
+        groups.push(groupNodeIds);
+      }
+    }
+
+    cycleGroupsRef.current = groups;
   };
 
   // ---------- INITIAL MOUNT ----------
@@ -91,7 +159,26 @@ export default function ThoughtGraph() {
 
     g.selectAll("*").remove();
 
-    // LINKS
+    // Build cycle group index: nodeId -> group index
+    const cycleGroups = cycleGroupsRef.current || [];
+    const groupIndexById = new Map();
+    cycleGroups.forEach((group, gi) => {
+      group.forEach((id) => groupIndexById.set(id, gi));
+    });
+
+    // soft translucent pastel fills
+    const cycleColors = ["#22c55e33", "#f9731633", "#a855f733", "#38bdf833"];
+
+    // HULL layer for cycles (behind nodes/links)
+    const hullLayer = g.append("g").attr("class", "cycle-hulls");
+    const hullPaths = cycleGroups.map((_, i) =>
+      hullLayer
+        .append("path")
+        .attr("fill", cycleColors[i % cycleColors.length])
+        .attr("stroke", "none")
+    );
+
+    // LINKS (thicker for stronger similarity)
     const link = g
       .append("g")
       .selectAll("line")
@@ -99,7 +186,9 @@ export default function ThoughtGraph() {
       .enter()
       .append("line")
       .attr("stroke", "#4b5563")
-      .attr("stroke-width", (d) => d.weight || 1)
+      .attr("stroke-width", (d) =>
+        d.similarity != null ? 1 + d.similarity * 5 : d.weight || 1
+      )
       .attr("stroke-opacity", 0.9);
 
     // NODES
@@ -109,16 +198,28 @@ export default function ThoughtGraph() {
       .enter()
       .append("circle")
       .attr("r", 0)
-      .attr("fill", (d) => colorFor(d.id))
+      .attr("fill", (d) => {
+        const gi = groupIndexById.get(d.id);
+        if (gi != null) {
+          // stronger solid color for nodes in a cycle group
+          const base = cycleColors[gi % cycleColors.length].replace("33", "ff");
+          return base;
+        }
+        return colorFor(d.id);
+      })
       .style("cursor", "pointer")
-      .on("click", (_, d) => openSidebar(d))
-      .on("dblclick", (_, d) => openModal(d))
+      .on("click", (_, d) => {
+        openSidebar(d);
+      })
+      .on("dblclick", (_, d) => {
+        openModal(d);
+      })
       .transition()
       .duration(400)
       .ease(d3.easeElasticOut)
       .attr("r", 18);
 
-    // LABELS (brighter + theme-aware via themeRef)
+    // LABELS
     const isDark = themeRef.current === "dark";
     const labelColor = isDark ? "#f9fafb" : "#0f172a";
 
@@ -173,6 +274,29 @@ export default function ThoughtGraph() {
       label
         .attr("x", (d) => d.x)
         .attr("y", (d) => d.y);
+
+      // recompute hulls using current node positions
+      cycleGroups.forEach((group, gi) => {
+        const pts = group
+          .map((id) => nodes.find((n) => n.id === id))
+          .filter((n) => n && n.x != null && n.y != null)
+          .map((n) => [n.x, n.y]);
+
+        if (pts.length < 3) {
+          hullPaths[gi].attr("d", null);
+          return;
+        }
+
+        const hull = d3.polygonHull(pts);
+        if (!hull) {
+          hullPaths[gi].attr("d", null);
+          return;
+        }
+
+        const dPath =
+          "M" + hull.map((p) => `${p[0]},${p[1]}`).join("L") + "Z";
+        hullPaths[gi].attr("d", dPath);
+      });
     });
   };
 
@@ -222,18 +346,21 @@ export default function ThoughtGraph() {
       return;
     }
 
+    // Connect to ALL nodes above threshold
     const threshold = 0.35;
-    const top = scored.filter((s) => s.score >= threshold).slice(0, 2);
+    const similarNodes = scored.filter((s) => s.score >= threshold);
 
-    top.forEach((s) => {
+    similarNodes.forEach((s) => {
       links.push({
         source: s.node,
         target: newNode,
+        similarity: s.score,
         weight: 1 + s.score * 4,
       });
     });
 
     linksRef.current = links;
+    updateCycleGroups();
   };
 
   // ---------- ADD THOUGHT ----------
@@ -263,13 +390,71 @@ export default function ThoughtGraph() {
     renderGraph();
   };
 
-  // ---------- SIDEBAR (click) ----------
-  const openSidebar = (node) => {
-    const degree = linksRef.current.filter(
-      (l) => l.source.id === node.id || l.target.id === node.id
-    ).length;
+  // ---------- SIDEBAR (click) WITH EXPLANATIONS ----------
+  const openSidebar = async (node) => {
+    const neighbors = linksRef.current
+      .filter((l) => l.source.id === node.id || l.target.id === node.id)
+      .map((l) => (l.source.id === node.id ? l.target.id : l.source.id));
 
-    setSelectedNode({ ...node, degree });
+    const uniqueNeighbors = Array.from(new Set(neighbors));
+    const degree = uniqueNeighbors.length;
+
+    // initial state (loading explanations)
+    setSelectedNode({
+      id: node.id,
+      degree,
+      neighbors: uniqueNeighbors,
+      explanations: [],
+      loading: true,
+    });
+
+    if (uniqueNeighbors.length === 0) {
+      setSelectedNode((prev) =>
+        prev && prev.id === node.id ? { ...prev, loading: false } : prev
+      );
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        "https://thoughtweaver.onrender.com/api/explain-links",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            center: node.id,
+            neighbors: uniqueNeighbors,
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        throw new Error("Explain-links error");
+      }
+
+      const data = await res.json();
+      const explanations = Array.isArray(data.explanations)
+        ? data.explanations
+        : [];
+
+      setSelectedNode((prev) =>
+        prev && prev.id === node.id
+          ? {
+              ...prev,
+              loading: false,
+              explanations,
+            }
+          : prev
+      );
+    } catch (e) {
+      console.error("Explain-links failed", e);
+      setSelectedNode((prev) =>
+        prev && prev.id === node.id
+          ? { ...prev, loading: false }
+          : prev
+      );
+      showStatus("Explain-links failed");
+    }
   };
 
   // ---------- MODAL (double-click) ----------
@@ -300,6 +485,7 @@ export default function ThoughtGraph() {
         sourceId: l.source.id,
         targetId: l.target.id,
         weight: l.weight,
+        similarity: l.similarity ?? null,
       })),
     };
 
@@ -328,9 +514,16 @@ export default function ThoughtGraph() {
           const s = idMap[l.sourceId];
           const t = idMap[l.targetId];
           if (!s || !t) return null;
-          return { source: s, target: t, weight: l.weight || 1 };
+          return {
+            source: s,
+            target: t,
+            weight: l.weight || 1,
+            similarity: l.similarity ?? null,
+          };
         })
         .filter(Boolean);
+
+      updateCycleGroups();
 
       setSelectedNode(null);
       setModalNode(null);
@@ -435,7 +628,7 @@ export default function ThoughtGraph() {
           <br />
           {"scroll -> zoom"}
           <br />
-          click a node for details, double-click for popup info
+          click a node for AI link details, double-click for popup info
         </div>
       </div>
 
@@ -459,14 +652,58 @@ export default function ThoughtGraph() {
               ✕
             </button>
           </div>
+
           <div className="text-xs space-y-1">
             <div>
               <span className="font-semibold">Connections:</span>{" "}
-              {selectedNode.degree}
+              {selectedNode.degree ?? 0}
             </div>
             <div>
               <span className="font-semibold">Type:</span> thought
             </div>
+          </div>
+
+          <div className="text-xs mt-2 space-y-1">
+            {selectedNode.loading && (
+              <div className={isDark ? "text-slate-300" : "text-slate-600"}>
+                Analyzing links with ThoughtWeaver...
+              </div>
+            )}
+
+            {!selectedNode.loading &&
+              Array.isArray(selectedNode.explanations) &&
+              selectedNode.explanations.length > 0 && (
+                <div className="space-y-1">
+                  <div className="font-semibold">
+                    Why these thoughts are connected:
+                  </div>
+                  <ul className="list-disc list-inside space-y-1">
+                    {selectedNode.explanations.map((ex, idx) => (
+                      <li key={idx}>
+                        <span className="font-semibold">
+                          {ex.neighbor ??
+                            ex.neighborId ??
+                            "Related thought"}
+                          :
+                        </span>{" "}
+                        <span>{ex.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+            {!selectedNode.loading &&
+              (!selectedNode.explanations ||
+                selectedNode.explanations.length === 0) && (
+                <div
+                  className={
+                    isDark ? "text-slate-300" : "text-slate-600"
+                  }
+                >
+                  No detailed explanations available yet for these links.
+                </div>
+              )}
           </div>
         </div>
       )}
@@ -502,7 +739,9 @@ export default function ThoughtGraph() {
             </div>
             {modalNeighbors.length > 0 && (
               <div className="text-xs space-y-1 mb-3">
-                <div className="font-semibold mb-1">Connected thoughts:</div>
+                <div className="font-semibold mb-1">
+                  Connected thoughts:
+                </div>
                 <ul className="list-disc list-inside space-y-1">
                   {modalNeighbors.map((n) => (
                     <li key={n}>{n}</li>
@@ -511,8 +750,8 @@ export default function ThoughtGraph() {
               </div>
             )}
             <div className="text-[11px] opacity-80">
-              Double-clicking doesn&apos;t change the graph; it just lets you
-              inspect how this thought fits into the network.
+              Double-clicking doesn&apos;t change the graph; it just lets
+              you inspect how this thought fits into the network.
             </div>
           </div>
         </div>
